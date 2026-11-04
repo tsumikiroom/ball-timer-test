@@ -1,0 +1,633 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#ffffff">
+<title>Ball Timer</title>
+<link rel="icon" href="data:,">
+<style>
+:root { --paper: #fff; --ink: #111; --mute: #8a8a8a; --line: rgba(0,0,0,.12); }
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body {
+  margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none;
+  background: var(--paper); color: var(--ink); touch-action: none;
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  font: 16px/1.4 system-ui, -apple-system, "Hiragino Sans", "Segoe UI", sans-serif;
+}
+/* #app stays "portrait to the device": if the browser auto-rotates, it is turned back */
+#app { position: fixed; left: 0; top: 0; overflow: hidden; transform-origin: 50% 50%; background: var(--paper); }
+#stage { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+#stage.turn { transition: transform .7s cubic-bezier(.55,.05,.3,1); }
+.hud { position: absolute; inset: 0; pointer-events: none; transition: transform .4s ease; }
+#app.inv .hud, #app.inv #dial .box { transform: rotate(180deg); }
+#hint {
+  position: absolute; left: 16px; right: 16px; top: 50%; transform: translateY(-50%);
+  text-align: center; color: var(--mute); font-size: 15px; transition: opacity .6s; white-space: pre-line;
+}
+button {
+  font: inherit; color: var(--ink); background: var(--paper); touch-action: manipulation;
+  border: 1.5px solid var(--ink); border-radius: 999px; min-height: 52px; padding: 0 22px; cursor: pointer;
+}
+button.main { background: var(--ink); color: var(--paper); }
+#flip {
+  position: absolute; right: max(10px, env(safe-area-inset-right, 0px)); top: 50%; transform: translateY(-50%);
+  width: 40px; min-height: 40px; padding: 0; font-size: 19px; line-height: 1; display: none; background: #fff;
+}
+#flip.show { display: block; }
+#start {
+  position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; gap: 14px;
+  padding: calc(env(safe-area-inset-top, 0px) + 24px) max(24px, env(safe-area-inset-right, 0px)) calc(env(safe-area-inset-bottom, 0px) + 24px) max(24px, env(safe-area-inset-left, 0px));
+  background: var(--paper);
+}
+#start h1 { margin: 0; font-size: 22px; font-weight: 600; }
+#start p { margin: 0 0 14px; color: var(--mute); }
+#start button { min-height: 64px; font-size: 19px; }
+#start.hide { display: none; }
+#dial {
+  position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+  background: transparent; touch-action: none; cursor: grab;   /* nothing behind is blurred or hidden; drag anywhere turns it */
+}
+#dial.show { display: flex; }
+#dial .box { pointer-events: none; transition: transform .4s ease; }
+#ring { width: min(150px, 40vw, 30vh); height: min(150px, 40vw, 30vh); display: block; overflow: visible; }
+#ring .halo { stroke: #fff; }
+#ring text { paint-order: stroke; stroke: #fff; stroke-width: 5px; stroke-linejoin: round; }
+#dval { font-family: "Bahnschrift SemiCondensed", "Bahnschrift", "DIN Condensed", "Avenir Next Condensed", "Roboto Condensed", "Arial Narrow", sans-serif; font-weight: 600; font-stretch: condensed; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<div id="app">
+  <canvas id="stage"></canvas>
+  <div class="hud"><div id="hint"></div></div>
+  <button id="flip" aria-label="Flip">&#8635;</button>
+
+  <div id="dial" aria-hidden="true">
+    <div class="box">
+      <svg id="ring" viewBox="0 0 300 300" aria-label="Seconds dial">
+        <g id="ticks"></g>
+        <circle class="halo" cx="150" cy="150" r="112" fill="none" stroke-width="28"/>
+        <circle cx="150" cy="150" r="112" fill="none" stroke="#dcdcdc" stroke-width="16"/>
+        <circle id="arcHalo" class="halo" cx="150" cy="150" r="112" fill="none" stroke-width="28" stroke-linecap="round"
+                transform="rotate(-90 150 150)" stroke-dasharray="0 1000"/>
+        <circle id="arc" cx="150" cy="150" r="112" fill="none" stroke="#111" stroke-width="16" stroke-linecap="round"
+                transform="rotate(-90 150 150)" stroke-dasharray="0 1000"/>
+        <circle id="knob" cx="150" cy="38" r="4.5" fill="#fff"/>
+        <text id="dval" x="150" y="174" text-anchor="middle" font-size="80" fill="#111">60</text>
+        <text id="dsub" x="150" y="206" text-anchor="middle" font-size="16" fill="#777" style="letter-spacing:.14em">SECONDS</text>
+      </svg>
+    </div>
+  </div>
+
+  <div id="start">
+    <h1>Ball Timer</h1>
+    <p>One ball drops every second. Turn the phone upside down to start, like an hourglass. Tap the screen to choose the seconds.</p>
+    <button id="go" class="main">Start</button>
+  </div>
+</div>
+
+<script>
+'use strict';
+const Q = new URLSearchParams(location.search);
+const SPEED = Math.max(0.1, Math.min(50, Number(Q.get('speed')) || 1)); // test only: faster seconds
+const $app = document.getElementById('app');
+const cv = document.getElementById('stage');
+const ctx = cv.getContext('2d');
+const $hint = document.getElementById('hint');
+const $flip = document.getElementById('flip');
+const MIN_S = 1, MAX_S = 600;
+
+// ---------- state ----------
+let W = 0, H = 0, DPR = 1, ANG = 0;
+let balls = [];            // {x,y,px,py,base,s,st,held,dying, sq,sqv,sqa}
+let Rcur = 18;             // current base radius (eases toward the target for the live count)
+let state = 'ready';       // ready | running | done
+let holdSide = 1;          // +1: device top is "up" (the waiting balls cling there), -1: device bottom is up
+let gx = 0, gy = 1;        // gravity direction in device-portrait coords (unit)
+let nextT = 0;             // when the next ball drops
+let paused = false;        // during the manual flip animation
+let doneT = -1;
+let sensorOn = false;
+let sideCand = 0, sideCandT = 0;
+
+function screenAngle() {
+  const a = (screen.orientation && typeof screen.orientation.angle === 'number') ? screen.orientation.angle
+          : (typeof window.orientation === 'number' ? window.orientation : 0);
+  return ((a % 360) + 360) % 360;
+}
+
+// ---------- layout (keep the picture fixed to the device, whatever the browser rotation) ----------
+function layout() {
+  const oldW = W, oldH = H, oldAng = ANG;
+  ANG = screenAngle();
+  if (ANG !== oldAng) dragA = null;          // the dial turns with the page: start the drag again
+  const vw = window.innerWidth, vh = window.innerHeight, side = ANG % 180 !== 0;
+  W = side ? vh : vw; H = side ? vw : vh;
+  $app.style.width = W + 'px'; $app.style.height = H + 'px';
+  $app.style.left = (vw - W) / 2 + 'px'; $app.style.top = (vh - H) / 2 + 'px';
+  $app.style.transform = ANG ? `rotate(${-ANG}deg)` : '';
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  if (oldW && oldH && (oldW !== W || oldH !== H)) {
+    for (const b of balls) { b.x *= W / oldW; b.px *= W / oldW; b.y *= H / oldH; b.py *= H / oldH; }
+  }
+}
+
+// The waiting ("held") balls cling to the up end, as in the sketch: they are pulled gently toward it and stay
+// where they are when the phone is turned over. Every second the lowest one near the middle lets go and falls.
+function onUpSide(b) { return holdSide > 0 ? b.y < H / 2 : b.y > H / 2; }
+const CLING = 0.35;        // pull toward the up end, as a share of gravity
+
+// ---------- balls ----------
+function radiusFor(n) {
+  const area = W * H * 0.34 * 0.55;   // a little over a third of the screen, loosely packed
+  return Math.max(2.5, Math.min(44, Math.sqrt(area / (Math.PI * Math.max(1, n)))));
+}
+function alive() { let n = 0; for (const b of balls) if (!b.dying) n++; return n; }
+function heldCount() { let n = 0; for (const b of balls) if (b.held && !b.dying) n++; return n; }
+function newBall(x, y, held, s) {
+  return { x, y, px: x, py: y, base: 0.86 + Math.random() * 0.28, s, st: 1, held, dying: false, sq: 0, sqv: 0, sqa: 0 };
+}
+function packAtBottom(n) {
+  balls = []; Rcur = radiusFor(n);
+  const step = Rcur * 2.05, cols = Math.max(1, Math.floor((W - Rcur * 2) / step)), x0 = (W - (cols - 1) * step) / 2;
+  for (let i = 0; i < n; i++) {
+    const row = Math.floor(i / cols), col = i % cols;
+    let x = x0 + col * step + ((row % 2) ? step * .5 : 0); if (x > W - Rcur) x -= step;
+    balls.push(newBall(x + (Math.random() - .5) * Rcur * .3, H - Rcur - row * step * .88, 0, 1));
+  }
+}
+// the "pile" the dial edits: the held balls while running, otherwise everything (resting on the gravity side)
+function pileOf(b) { return state === 'running' ? b.held === 1 : true; }
+function upness(b) { return -(b.x * gx + b.y * gy); }   // larger = further against gravity
+// the pile's open face: the top of the resting pile, or the underside of the clinging (waiting) pile
+function faceDir() { return state === 'running' ? 1 : -1; }      // +1: along gravity, -1: against it
+function faceOf(b) { return faceDir() * (b.x * gx + b.y * gy); }
+function setCount(target) {
+  // while running, the fallen balls count toward the cap too
+  const cap = state === 'running' ? MAX_S - (alive() - heldCount()) : MAX_S;
+  target = Math.max(MIN_S, Math.min(Math.max(MIN_S, cap), target));
+  const pile = balls.filter(b => !b.dying && pileOf(b));
+  let diff = target - pile.length;
+  if (diff > 0) {
+    // new balls appear just off the open face of the pile and settle onto it while growing in
+    let top = -Infinity;
+    for (const b of pile) top = Math.max(top, faceOf(b));
+    const fx = gx * faceDir(), fy = gy * faceDir();
+    for (let k = 0; k < diff; k++) {
+      const r = radiusFor(pile.length + 1), lift = 2.2 * r + (k / Math.max(1, Math.floor(W / (2.2 * r)))) * 2.2 * r;
+      let x, y;
+      if (pile.length && isFinite(top)) {
+        // point on the surface line, then random spread across it
+        const t = (Math.random() - .5) * W * .8;
+        x = W / 2 + (-gy) * t; y = H / 2 + gx * t;
+        const u = x * fx + y * fy;                  // how far along the face direction that point is
+        x += fx * (top - u + lift); y += fy * (top - u + lift);
+      } else if (state === 'running') { x = W / 2 + (Math.random() - .5) * W * .5; y = holdSide > 0 ? lift : H - lift; }
+      else { x = W / 2 + (Math.random() - .5) * W * .5; y = gy >= 0 ? H - lift : lift; }
+      x = Math.max(r, Math.min(W - r, x)); y = Math.max(r, Math.min(H - r, y));
+      const b = newBall(x, y, state === 'running' ? 1 : 0, 0.15); balls.push(b); pile.push(b);
+    }
+  } else if (diff < 0) {
+    // the balls on the open face shrink away
+    pile.sort((a, b) => faceOf(b) - faceOf(a));
+    for (let k = 0; k < -diff; k++) { pile[k].dying = true; pile[k].st = 0; }
+  }
+  if (state === 'done') state = 'ready';
+}
+
+// ---------- physics (Verlet + spatial grid) ----------
+let gridHead = new Int32Array(1), gridNext = new Int32Array(1), gcols = 1, grows = 1, gsize = 1;
+let RX = new Float32Array(1);                 // per-ball radius for this frame
+function buildGrid(n) {
+  gcols = Math.max(1, Math.ceil(W / gsize)); grows = Math.max(1, Math.ceil(H / gsize));
+  if (gridHead.length < gcols * grows) gridHead = new Int32Array(gcols * grows);
+  if (gridNext.length < n) gridNext = new Int32Array(n);
+  gridHead.fill(-1, 0, gcols * grows);
+  for (let i = 0; i < n; i++) {
+    const b = balls[i];
+    let cx = (b.x / gsize) | 0, cy = (b.y / gsize) | 0;
+    cx = cx < 0 ? 0 : cx >= gcols ? gcols - 1 : cx; cy = cy < 0 ? 0 : cy >= grows ? grows - 1 : cy;
+    const k = cy * gcols + cx; gridNext[i] = gridHead[k]; gridHead[k] = i;
+  }
+}
+function collide() {
+  for (let cy = 0; cy < grows; cy++) for (let cx = 0; cx < gcols; cx++) {
+    for (let i = gridHead[cy * gcols + cx]; i !== -1; i = gridNext[i]) {
+      const A = balls[i];
+      for (let oy = 0; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) {
+        if (oy === 0 && ox < 0) continue;
+        const nx = cx + ox, ny = cy + oy;
+        if (nx < 0 || nx >= gcols || ny >= grows) continue;
+        for (let j = gridHead[ny * gcols + nx]; j !== -1; j = gridNext[j]) {
+          if (oy === 0 && ox === 0 && j >= i) continue;
+          const B = balls[j];
+          const dx = B.x - A.x, dy = B.y - A.y, rr = RX[i] + RX[j];
+          const d2 = dx * dx + dy * dy;
+          if (d2 >= rr * rr || d2 < 1e-8) continue;
+          const d = Math.sqrt(d2), push = softFix(rr - d, rr) * 0.5 / d;
+          A.x -= dx * push; A.y -= dy * push; B.x += dx * push; B.y += dy * push;
+        }
+      }
+    }
+  }
+}
+// soft contact: the outer shell gives way a little (spongy), only the core is hard
+const CORE = 0.84, SOFT = 0.3;
+function softFix(pen, rr) {
+  const shell = rr * (1 - CORE);
+  return pen > shell ? (pen - shell) + shell * SOFT : pen * SOFT;
+}
+let HIT = new Float32Array(1), HITA = new Float32Array(1);
+function step(dt) {
+  const n = balls.length; if (!n) return;
+  const SUB = n > 300 ? 5 : 8;              // fewer sub-steps when there are many (small) balls
+  // sizes: base radius eases toward the one that fits the live count; new balls grow in, removed ones shrink out
+  Rcur += (radiusFor(alive()) - Rcur) * Math.min(1, dt * 6);
+  if (RX.length < n) RX = new Float32Array(n * 2);
+  let rmax = 0;
+  for (let i = 0; i < n; i++) {
+    const b = balls[i];
+    b.s += (b.st - b.s) * Math.min(1, dt * 12);
+    RX[i] = Math.max(0.01, Rcur * b.base * b.s); if (RX[i] > rmax) rmax = RX[i];
+  }
+  gsize = Math.max(4, rmax * 2);
+  const h = dt / SUB, g = 3 * H * h * h, ax = gx * g, ay = gy * g, vmax = rmax * 0.8;
+  if (HIT.length < n) { HIT = new Float32Array(n * 2); HITA = new Float32Array(n * 2); }
+  const hit = HIT, hitA = HITA; hit.fill(0, 0, n);
+  for (let s = 0; s < SUB; s++) {
+    for (let i = 0; i < n; i++) {
+      const b = balls[i];
+      let vx = (b.x - b.px) * 0.998, vy = (b.y - b.py) * 0.998;
+      const v = Math.hypot(vx, vy); if (v > vmax) { vx *= vmax / v; vy *= vmax / v; }
+      const pull = b.held ? -CLING : 1;
+      b.px = b.x; b.py = b.y; b.x += vx + ax * pull; b.y += vy + ay * pull;
+      b._x = b.x; b._y = b.y;                           // predicted position, to measure how hard it was pushed
+    }
+    buildGrid(n);
+    for (let it = 0, its = n > 300 ? 3 : 2; it < its; it++) {
+      collide();
+      for (let i = 0; i < n; i++) {
+        const b = balls[i], r = RX[i];
+        if (b.x < r) b.x += softFix(r - b.x, r); else if (b.x > W - r) b.x -= softFix(b.x - (W - r), r);
+        if (b.y < r) b.y += softFix(r - b.y, r); else if (b.y > H - r) b.y -= softFix(b.y - (H - r), r);
+        const rc = r * CORE;                                   // never past the hard core
+        if (b.x < rc) b.x = rc; else if (b.x > W - rc) b.x = W - rc;
+        if (b.y < rc) b.y = rc; else if (b.y > H - rc) b.y = H - rc;
+      }
+    }
+    for (let i = 0; i < n; i++) {
+      const b = balls[i], cx = b.x - b._x, cy = b.y - b._y, m = Math.hypot(cx, cy) / h;   // px/s of sudden stop
+      if (m > hit[i]) { hit[i] = m; hitA[i] = Math.atan2(cy, cx); }
+    }
+  }
+  // squash: a landing or bump pushes a little spring; it flattens along the push and wobbles back
+  const K = 160, C = 3.6;
+  for (let i = 0; i < n; i++) {
+    const b = balls[i];
+    if (hit[i] > 200 && b.sq < 0.12) {
+      const kick = Math.min(6.5, (hit[i] - 200) / 90);
+      b.sqv += kick; b.sqa = hitA[i];
+    }
+    b.sqv += (-K * b.sq - C * b.sqv) * dt; b.sq += b.sqv * dt;
+    if (b.sq > 0.26) { b.sq = 0.26; b.sqv = Math.min(0, b.sqv); }
+    if (b.sq < -0.12) { b.sq = -0.12; b.sqv = Math.max(0, b.sqv); }
+  }
+  // drop balls that have shrunk away
+  if (balls.some(b => b.dying && b.s < 0.03)) balls = balls.filter(b => !(b.dying && b.s < 0.03));
+}
+
+// ---------- timer ----------
+const PERIOD = () => 1000 / SPEED;
+function begin(side) {
+  if (side !== holdSide) dragA = null;
+  holdSide = side;
+  $app.classList.toggle('inv', side < 0);
+  let held = 0;
+  for (const b of balls) { b.held = (!b.dying && onUpSide(b)) ? 1 : 0; held += b.held; }
+  if (!held) { state = 'ready'; return; }
+  state = 'running'; doneT = -1; nextT = performance.now() + PERIOD();
+  wakeLock(true); hint('');
+}
+function releaseOne() {
+  // the ball furthest down (toward gravity), preferring the middle
+  let best = null, bs = -Infinity;
+  for (const b of balls) if (b.held && !b.dying) {
+    const dx = b.x - W / 2, dy = b.y - H / 2;
+    const sc = dx * gx + dy * gy - Math.abs(dx * -gy + dy * gx) * 0.35;
+    if (sc > bs) { bs = sc; best = b; }
+  }
+  if (best) best.held = 0;
+}
+function tickTimer(now) {
+  if (state !== 'running' || paused) return;
+  while (now >= nextT && heldCount() > 0) { releaseOne(); nextT += PERIOD(); }
+  if (heldCount() === 0) finish(now);
+}
+function finish(now) {
+  state = 'done'; doneT = now;
+  wakeLock(false);
+  try { navigator.vibrate && navigator.vibrate([40, 70, 40]); } catch (e) {}
+  chime();
+  // every ball gives a small jiggle, in a wave from the middle
+  for (const b of balls) { b._jig = now + Math.abs(b.x - W / 2) * 1.2; }
+  hint('Done', 2500);
+}
+
+let hintTimer = 0;
+function hint(msg, ms) {
+  clearTimeout(hintTimer);
+  $hint.textContent = msg; $hint.style.opacity = msg ? 1 : 0;
+  if (ms) hintTimer = setTimeout(() => { $hint.style.opacity = 0; }, ms);
+}
+function fmt(s) { return s < 60 ? String(s) : Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
+
+// ---------- manual flip (no sensor) ----------
+function manualFlip() {
+  if (paused || !balls.length) return;
+  // mirror through the center, show it turned so nothing seems to move, then animate the turn back
+  for (const b of balls) { b.x = W - b.x; b.y = H - b.y; b.px = W - b.px; b.py = H - b.py; }
+  paused = true;
+  cv.classList.remove('turn'); cv.style.transform = 'rotate(180deg)';
+  draw(performance.now());
+  void cv.offsetWidth;
+  cv.classList.add('turn'); cv.style.transform = 'rotate(0deg)';
+  setTimeout(() => {
+    cv.classList.remove('turn'); cv.style.transform = '';
+    paused = false;
+    begin(holdSide);
+  }, 720);
+}
+
+// ---------- sensor ----------
+function onOrient(e) {
+  if (e.beta == null || e.gamma == null) return;
+  sensorOn = true;
+  $flip.classList.remove('show');
+  const b = e.beta * Math.PI / 180, c = e.gamma * Math.PI / 180;
+  // gravity in the device's own portrait coords (x right, y toward the bottom edge) - browser rotation is ignored
+  const sx = Math.sin(c) * Math.cos(b), sy = Math.sin(b);
+  const m = Math.hypot(sx, sy);
+  if (m > 0.3) { gx = sx / m; gy = sy / m; }          // lying flat: keep the last direction
+  const side = sy > 0.5 ? 1 : sy < -0.5 ? -1 : 0;
+  const now = performance.now();
+  if (side && side !== holdSide && !paused) {
+    if (sideCand !== side) { sideCand = side; sideCandT = now; }
+    else if (now - sideCandT > 150) { sideCand = 0; begin(side); }
+  } else sideCand = 0;
+}
+async function enableSensor() {
+  const DOE = window.DeviceOrientationEvent;
+  if (!DOE) return false;
+  try {
+    if (typeof DOE.requestPermission === 'function') {
+      const r = await DOE.requestPermission();
+      if (r !== 'granted') return false;
+    }
+  } catch (e) { return false; }
+  window.addEventListener('deviceorientation', onOrient);
+  return true;
+}
+
+// ---------- sound / wake ----------
+let actx = null;
+function chime() {
+  if (!actx) return;
+  try {
+    const t0 = actx.currentTime;
+    [[660, 0], [990, 0.16]].forEach(([f, dt]) => {
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = 'sine'; o.frequency.value = f;
+      g.gain.setValueAtTime(0, t0 + dt); g.gain.linearRampToValueAtTime(0.05, t0 + dt + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + 0.9);
+      o.connect(g).connect(actx.destination); o.start(t0 + dt); o.stop(t0 + dt + 1);
+    });
+  } catch (e) {}
+}
+let lock = null, wantLock = false, asking = false;
+async function wakeLock(on) {
+  wantLock = on;
+  try {
+    if (on && !lock && !asking && navigator.wakeLock) {
+      asking = true;
+      const l = await navigator.wakeLock.request('screen');
+      asking = false;
+      if (!wantLock) { l.release(); return; }               // the timer ended while we were asking
+      lock = l; l.addEventListener('release', () => { if (lock === l) lock = null; });
+    }
+    if (!on && lock) { const l = lock; lock = null; await l.release(); }
+  } catch (e) { asking = false; }
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden && state === 'running') wakeLock(true); });
+
+// ---------- drawing: flat black soft circles on white ----------
+// Each circle is drawn as a smooth outline. Where it presses on a neighbour or a wall, the outline is
+// cut flat (with a thin white gap so touching balls stay separate) and the rest bulges a little to keep its area.
+const MAXV = 28, VR = new Float32Array(MAXV), VC = new Uint8Array(MAXV), VX = new Float32Array(MAXV), VY = new Float32Array(MAXV), PL = new Float32Array(3 * 40);
+let np = 0, planeR = 1;
+function addPlane(nx, ny, dist) { if (np < 40 && dist < planeR * 1.3) { PL[np * 3] = nx; PL[np * 3 + 1] = ny; PL[np * 3 + 2] = dist; np++; } }
+const VIS = 1.13;   // drawn a touch larger than the physics radius, so resting neighbours softly flatten
+function draw(now) {
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+  const n = balls.length;
+  if (!n) return;
+  if (RX.length < n) RX = new Float32Array(n * 2);
+  let rmax = 0;
+  for (let i = 0; i < n; i++) { const b = balls[i]; RX[i] = Math.max(0.01, Rcur * b.base * b.s) * VIS; if (RX[i] > rmax) rmax = RX[i]; }
+  gsize = Math.max(4, rmax * 2); buildGrid(n);
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const b = balls[i], r = RX[i];
+    if (b._jig && now >= b._jig) { b.sqv += 2.6; b.sqa = Math.atan2(gy, gx); b._jig = 0; }
+    if (r < 0.6) continue;
+    const gap = Math.max(0.6, r * 0.06);
+    np = 0; planeR = r;
+    // neighbours
+    let cx = (b.x / gsize) | 0, cy = (b.y / gsize) | 0;
+    for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) {
+      const gx_ = cx + ox, gy_ = cy + oy;
+      if (gx_ < 0 || gy_ < 0 || gx_ >= gcols || gy_ >= grows) continue;
+      for (let j = gridHead[gy_ * gcols + gx_]; j !== -1; j = gridNext[j]) {
+        if (j === i) continue;
+        const o = balls[j], dx = o.x - b.x, dy = o.y - b.y, rr = r + RX[j], d2 = dx * dx + dy * dy;
+        if (d2 >= rr * rr || d2 < 1e-6) continue;
+        const d = Math.sqrt(d2);
+        addPlane(dx / d, dy / d, d * r / rr - gap * 0.5);
+      }
+    }
+    // walls
+    addPlane(-1, 0, b.x); addPlane(1, 0, W - b.x); addPlane(0, -1, b.y); addPlane(0, 1, H - b.y);
+    // outline: wobble ellipse, cut by the planes, then refill the lost area
+    const K = r < 5 ? 10 : r < 10 ? 14 : r < 20 ? 20 : MAXV, dth = Math.PI * 2 / K;
+    const ea = r * (1 - b.sq), ec = r * (1 + b.sq * 0.6);
+    let aCut = 0, aFree = 0;
+    for (let k = 0; k < K; k++) {
+      const th = k * dth, ux = Math.cos(th), uy = Math.sin(th), ph = th - b.sqa;
+      const cp = Math.cos(ph), sp = Math.sin(ph);
+      let rad = ea * ec / Math.sqrt((ec * cp) ** 2 + (ea * sp) ** 2), cut = 0;
+      for (let p = 0; p < np; p++) {
+        const dn = ux * PL[p * 3] + uy * PL[p * 3 + 1];
+        if (dn > 0.05) { const lim = Math.max(r * 0.35, PL[p * 3 + 2]) / dn; if (lim < rad) { rad = lim; cut = 1; } }
+      }
+      VR[k] = rad; VC[k] = cut;
+      if (cut) aCut += rad * rad; else aFree += rad * rad;
+    }
+    if (aFree > 0) {
+      const target = 2 * Math.PI * r * r / dth / VIS / VIS;   // sum of rad^2 for the round, uncut ball
+      const f = Math.min(1.14, Math.sqrt(Math.max(aFree, target - aCut) / aFree));
+      for (let k = 0; k < K; k++) if (!VC[k]) VR[k] *= f;
+    }
+    // smooth closed curve through the midpoints
+    for (let k = 0; k < K; k++) { VX[k] = b.x + Math.cos(k * dth) * VR[k]; VY[k] = b.y + Math.sin(k * dth) * VR[k]; }
+    ctx.moveTo((VX[K - 1] + VX[0]) / 2, (VY[K - 1] + VY[0]) / 2);
+    for (let k = 0; k < K; k++) { const k1 = (k + 1) % K; ctx.quadraticCurveTo(VX[k], VY[k], (VX[k] + VX[k1]) / 2, (VY[k] + VY[k1]) / 2); }
+    ctx.closePath();
+  }
+  ctx.fill();
+}
+
+let lastT = performance.now();
+function frame(now) {
+  const dt = Math.min(1 / 30, (now - lastT) / 1000); lastT = now;
+  if (!paused && dt > 0) step(dt);
+  tickTimer(now);
+  if (dialOpen() && dialVal !== currentCount()) { dialVal = currentCount(); renderDial(); }
+  draw(now);
+  requestAnimationFrame(frame);
+}
+
+// ---------- dial (live: turning it adds or removes balls right away) ----------
+const $dial = document.getElementById('dial'), $ring = document.getElementById('ring');
+const $dval = document.getElementById('dval'), $dsub = document.getElementById('dsub');
+const $knob = document.getElementById('knob'), $arc = document.getElementById('arc');
+let dialVal = 60, dragA = null, acc = 0, applied = 0, idleTimer = 0;
+const $arcHalo = document.getElementById('arcHalo');
+const tickEls = [];
+(function ticks() {
+  const g = document.getElementById('ticks');
+  for (let k = 0; k < 60; k++) {
+    const a = k / 60 * Math.PI * 2, r1 = k % 5 ? 129 : 126, r2 = 138;
+    const l = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    l.setAttribute('x1', 150 + Math.sin(a) * r1); l.setAttribute('y1', 150 - Math.cos(a) * r1);
+    l.setAttribute('x2', 150 + Math.sin(a) * r2); l.setAttribute('y2', 150 - Math.cos(a) * r2);
+    l.setAttribute('stroke-width', k % 5 ? 1 : 1.8);
+    g.appendChild(l); tickEls.push(l);
+  }
+})();
+function renderDial() {
+  $dval.textContent = fmt(dialVal);
+  $dsub.textContent = dialVal < 60 ? (dialVal === 1 ? 'SECOND' : 'SECONDS') : 'MIN : SEC';
+  const f = (dialVal % 60) / 60, shown = dialVal >= 60 && f === 0 ? 1 : f, a = shown * Math.PI * 2;
+  const circ = 2 * Math.PI * 112;
+  $arc.setAttribute('stroke-dasharray', `${shown * circ} ${circ}`); $arcHalo.setAttribute('stroke-dasharray', `${shown * circ} ${circ}`);
+  $knob.setAttribute('cx', 150 + Math.sin(a) * 112); $knob.setAttribute('cy', 150 - Math.cos(a) * 112);
+  const lit = Math.round(shown * 60), turns = Math.floor((dialVal - 1) / 60);
+  tickEls.forEach((l, k) => l.setAttribute('stroke', k < lit ? 'rgba(0,0,0,.8)' : `rgba(0,0,0,${turns ? .3 : .12})`));
+}
+// the dial edits by steps (+1 / -1), so it keeps working while balls are dropping out of the top pile
+function nudge(delta) {
+  const now = currentCount();
+  setCount(now + delta);
+  const v = currentCount();
+  dialVal = v; renderDial(); keepOpen();
+  return v - now;
+}
+function ringAngle(e) {
+  const r = $ring.getBoundingClientRect();
+  let a = Math.atan2(e.clientX - (r.left + r.width / 2), -(e.clientY - (r.top + r.height / 2)));
+  a += ANG * Math.PI / 180;                                    // #app may be turned against the browser rotation
+  if ($app.classList.contains('inv')) a += Math.PI;            // the dial is shown upside down
+  return a;
+}
+function currentCount() { return state === 'running' ? heldCount() : alive(); }
+function dialOpen() { return $dial.classList.contains('show'); }
+function keepOpen() { clearTimeout(idleTimer); idleTimer = setTimeout(() => { if (dragA == null) closeDial(); }, 3000); }
+function openDial() { if (paused) return; hint(''); dialVal = currentCount(); renderDial(); $dial.classList.add('show'); $dial.setAttribute('aria-hidden', 'false'); keepOpen(); }
+function closeDial() { clearTimeout(idleTimer); $dial.classList.remove('show'); $dial.setAttribute('aria-hidden', 'true'); dragA = null; }
+
+// ---------- touch: tap = dial in the center, two quick taps = flip, drag anywhere = turn the dial ----------
+let downAt = null, lastTapT = 0, tapTimer = 0;
+function onDown(e) {
+  downAt = { x: e.clientX, y: e.clientY, t: performance.now(), id: e.pointerId };
+  try { e.target.setPointerCapture(e.pointerId); } catch (err) {}
+}
+function onMove(e) {
+  if (!downAt || e.pointerId !== downAt.id) return;
+  if (dragA == null) {
+    if (Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) < 12 || paused) return;
+    clearTimeout(tapTimer); lastTapT = 0;
+    if (!dialOpen()) openDial();
+    dragA = ringAngle(e); acc = 0; applied = 0;
+    return;
+  }
+  const a = ringAngle(e); let d = a - dragA;
+  if (d > Math.PI) d -= Math.PI * 2; else if (d < -Math.PI) d += Math.PI * 2;
+  dragA = a; acc += d;
+  const steps = Math.round(acc / (Math.PI * 2) * 60);           // one turn = 60 s
+  if (steps !== applied) {
+    const want = steps - applied, got = nudge(want);
+    applied += want;
+    if (got !== want) { acc = applied / 60 * Math.PI * 2; }       // stopped at an end: no wind-up
+  }
+}
+function onUp(e) {
+  if (!downAt || e.pointerId !== downAt.id) return;
+  const wasDrag = dragA != null, quick = performance.now() - downAt.t < 400;
+  downAt = null;
+  if (wasDrag) { dragA = null; keepOpen(); return; }
+  if (!quick) return;
+  const now = performance.now();
+  if (dialOpen()) { closeDial(); lastTapT = now; return; }
+  if (now - lastTapT < 320) { clearTimeout(tapTimer); lastTapT = 0; manualFlip(); return; }
+  lastTapT = now;
+  tapTimer = setTimeout(() => { if (lastTapT === now) { lastTapT = 0; openDial(); } }, 320);
+}
+for (const el of [cv, $dial]) {
+  el.addEventListener('pointerdown', onDown); el.addEventListener('pointermove', onMove);
+  el.addEventListener('pointerup', onUp);
+  el.addEventListener('pointercancel', () => { downAt = null; dragA = null; });
+}
+$dial.addEventListener('wheel', e => { e.preventDefault(); nudge(e.deltaY < 0 ? 1 : -1); }, { passive: false });
+$flip.addEventListener('click', manualFlip);
+window.addEventListener('keydown', e => {
+  if ($dial.classList.contains('show')) {
+    if (e.key === 'Escape' || e.key === 'Enter') closeDial();
+    else if (e.key === 'ArrowUp' || e.key === 'ArrowRight') nudge(1);
+    else if (e.key === 'ArrowDown' || e.key === 'ArrowLeft') nudge(-1);
+    return;
+  }
+  if ((e.key === ' ' || e.key === 'f') && document.getElementById('start').classList.contains('hide')) { e.preventDefault(); manualFlip(); }
+});
+window.addEventListener('resize', layout);
+if (screen.orientation && screen.orientation.addEventListener) screen.orientation.addEventListener('change', layout);
+window.addEventListener('orientationchange', () => setTimeout(layout, 50));
+
+// ---------- start ----------
+document.getElementById('go').addEventListener('click', async () => {
+  try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) { actx = new AC(); actx.resume && actx.resume(); } } catch (e) { actx = null; }
+  const ok = await enableSensor();
+  document.getElementById('start').classList.add('hide');
+  if (ok) {
+    hint('Turn the phone upside down to start.\nTap to set the seconds.', 4000);
+    // no events at all = no usable sensor (most PCs)
+    setTimeout(() => { if (!sensorOn) { $flip.classList.add('show'); hint('No tilt sensor here.\nDouble-tap or press ↻ to flip.', 5000); } }, 1500);
+  } else {
+    $flip.classList.add('show');
+    hint('Tilt is off.\nDouble-tap or press ↻ to flip.', 5000);
+  }
+});
+
+layout();
+packAtBottom(60);
+requestAnimationFrame(frame);
+
+// test hook
+window.__bt = {
+  get state() { return { maxSq: +Math.max(0, ...balls.map(b => Math.abs(b.sq))).toFixed(3), state, n: balls.length, alive: alive(), held: heldCount(), R: +Rcur.toFixed(2), holdSide, sensorOn, gx: +gx.toFixed(2), gy: +gy.toFixed(2), ANG, W, H }; },
+  flip: manualFlip, openDial, closeDial, nudge, setCount,
+};
+</script>
+</body>
+</html>
