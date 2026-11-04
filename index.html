@@ -104,6 +104,7 @@ let Rcur = 18;             // current base radius (eases toward the target for t
 let state = 'ready';       // ready | running | done
 let holdSide = 1;          // +1: device top is "up" (the waiting balls cling there), -1: device bottom is up
 let gx = 0, gy = 1;        // gravity direction in device-portrait coords (unit)
+let gTarget = 1, gNow = 1;  // strength of the pull (0..1): weak while the phone is held sideways
 let nextT = 0;             // when the next ball drops
 let paused = false;        // during the manual flip animation
 let doneT = -1;
@@ -253,13 +254,15 @@ function step(dt) {
     RX[i] = Math.max(0.01, Rcur * b.base * b.s); if (RX[i] > rmax) rmax = RX[i];
   }
   gsize = Math.max(4, rmax * 2);
-  const h = dt / SUB, g = 3 * H * h * h, ax = gx * g, ay = gy * g, vmax = rmax * 0.8;
+  gNow += (gTarget - gNow) * Math.min(1, dt * 12);
+  const h = dt / SUB, g = 3 * H * h * h * gNow, ax = gx * g, ay = gy * g, vmax = rmax * 0.8;
+  const damp = 0.998 - (1 - gNow) * 0.03;        // with little pull, rolling dies down quickly
   if (HIT.length < n) { HIT = new Float32Array(n * 2); HITA = new Float32Array(n * 2); }
   const hit = HIT, hitA = HITA; hit.fill(0, 0, n);
   for (let s = 0; s < SUB; s++) {
     for (let i = 0; i < n; i++) {
       const b = balls[i];
-      let vx = (b.x - b.px) * 0.998, vy = (b.y - b.py) * 0.998;
+      let vx = (b.x - b.px) * damp, vy = (b.y - b.py) * damp;
       const v = Math.hypot(vx, vy); if (v > vmax) { vx *= vmax / v; vy *= vmax / v; }
       const pull = b.held ? -CLING : 1;
       b.px = b.x; b.py = b.y; b.x += vx + ax * pull; b.y += vy + ay * pull;
@@ -320,8 +323,12 @@ function releaseOne() {
   }
   if (best) best.held = 0;
 }
+let lastTickT = 0;
 function tickTimer(now) {
+  const dtt = lastTickT ? now - lastTickT : 0; lastTickT = now;
   if (state !== 'running' || paused) return;
+  // held sideways the hourglass stops: hold the clock while there is too little pull for a ball to fall
+  if (gNow < 0.5) { nextT += dtt; return; }
   while (now >= nextT && heldCount() > 0) { releaseOne(); nextT += PERIOD(); }
   if (heldCount() === 0) finish(now);
 }
@@ -369,12 +376,19 @@ function onOrient(e) {
   // gravity in the device's own portrait coords (x right, y toward the bottom edge) - browser rotation is ignored
   const sx = Math.sin(c) * Math.cos(b), sy = Math.sin(b);
   const m = Math.hypot(sx, sy);
-  if (m > 0.3) { gx = sx / m; gy = sy / m; }          // lying flat: keep the last direction
-  const side = sy > 0.5 ? 1 : sy < -0.5 ? -1 : 0;
+  // m: how upright the phone is (0 = lying flat, 1 = standing). Lying flat keeps the last direction.
+  if (m > 0.3) { gx = sx / m; gy = sy / m; }
+  // Standing and turned toward sideways: the pull fades, so the balls stay put while the phone is turned over.
+  // The fade only applies when the phone is clearly standing; lying flat it always pulls fully.
+  const side01 = Math.abs(gy), fade = side01 <= 0.25 ? 0 : side01 >= 0.6 ? 1 : (side01 - 0.25) / 0.35;
+  const stand = m <= 0.3 ? 0 : m >= 0.6 ? 1 : (m - 0.3) / 0.3;
+  gTarget = 1 - stand * (1 - fade);
+  // which end is up: decided only when clearly standing, just past sideways, before the pull toward the new bottom starts
+  const side = m < 0.45 ? 0 : gy > 0.2 ? 1 : gy < -0.2 ? -1 : 0;
   const now = performance.now();
   if (side && side !== holdSide && !paused) {
     if (sideCand !== side) { sideCand = side; sideCandT = now; }
-    else if (now - sideCandT > 150) { sideCand = 0; begin(side); }
+    else if (now - sideCandT > 80) { sideCand = 0; begin(side); }
   } else sideCand = 0;
 }
 async function enableSensor() {
@@ -403,6 +417,27 @@ function chime() {
       g.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + 0.9);
       o.connect(g).connect(actx.destination); o.start(t0 + dt); o.stop(t0 + dt + 1);
     });
+  } catch (e) {}
+}
+// dial tick: a very short filtered noise burst, like the detent of a dial; at most one every 28 ms
+let tickBuf = null, lastTick = 0;
+function tick() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  if (t - lastTick < 0.028) return;
+  lastTick = t;
+  try {
+    if (!tickBuf) {
+      const len = Math.floor(actx.sampleRate * 0.012);
+      tickBuf = actx.createBuffer(1, len, actx.sampleRate);
+      const d = tickBuf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (len * 0.12));
+    }
+    const src = actx.createBufferSource(), bp = actx.createBiquadFilter(), g = actx.createGain();
+    src.buffer = tickBuf; src.playbackRate.value = 0.9 + Math.random() * 0.2;
+    bp.type = 'bandpass'; bp.frequency.value = 3200; bp.Q.value = 1.4;
+    g.gain.value = 0.22;
+    src.connect(bp).connect(g).connect(actx.destination); src.start(t);
   } catch (e) {}
 }
 let lock = null, wantLock = false, asking = false;
@@ -531,6 +566,7 @@ function nudge(delta) {
   const now = currentCount();
   setCount(now + delta);
   const v = currentCount();
+  if (v !== now) tick();
   dialVal = v; renderDial(); keepOpen();
   return v - now;
 }
@@ -625,7 +661,7 @@ requestAnimationFrame(frame);
 
 // test hook
 window.__bt = {
-  get state() { return { maxSq: +Math.max(0, ...balls.map(b => Math.abs(b.sq))).toFixed(3), state, n: balls.length, alive: alive(), held: heldCount(), R: +Rcur.toFixed(2), holdSide, sensorOn, gx: +gx.toFixed(2), gy: +gy.toFixed(2), ANG, W, H }; },
+  get state() { return { gNow: +gNow.toFixed(2), maxSq: +Math.max(0, ...balls.map(b => Math.abs(b.sq))).toFixed(3), state, n: balls.length, alive: alive(), held: heldCount(), R: +Rcur.toFixed(2), holdSide, sensorOn, gx: +gx.toFixed(2), gy: +gy.toFixed(2), ANG, W, H }; },
   flip: manualFlip, openDial, closeDial, nudge, setCount,
 };
 </script>
