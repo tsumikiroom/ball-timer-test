@@ -104,7 +104,6 @@ let Rcur = 18;             // current base radius (eases toward the target for t
 let state = 'ready';       // ready | running | done
 let holdSide = 1;          // +1: device top is "up" (the waiting balls cling there), -1: device bottom is up
 let gx = 0, gy = 1;        // gravity direction in device-portrait coords (unit)
-let gTarget = 1, gNow = 1;  // strength of the pull (0..1): weak while the phone is held sideways
 let nextT = 0;             // when the next ball drops
 let paused = false;        // during the manual flip animation
 let doneT = -1;
@@ -254,15 +253,13 @@ function step(dt) {
     RX[i] = Math.max(0.01, Rcur * b.base * b.s); if (RX[i] > rmax) rmax = RX[i];
   }
   gsize = Math.max(4, rmax * 2);
-  gNow += (gTarget - gNow) * Math.min(1, dt * 12);
-  const h = dt / SUB, g = 3 * H * h * h * gNow, ax = gx * g, ay = gy * g, vmax = rmax * 0.8;
-  const damp = 0.998 - (1 - gNow) * 0.03;        // with little pull, rolling dies down quickly
+  const h = dt / SUB, g = 3 * H * h * h, ax = gx * g, ay = gy * g, vmax = rmax * 0.8;
   if (HIT.length < n) { HIT = new Float32Array(n * 2); HITA = new Float32Array(n * 2); }
   const hit = HIT, hitA = HITA; hit.fill(0, 0, n);
   for (let s = 0; s < SUB; s++) {
     for (let i = 0; i < n; i++) {
       const b = balls[i];
-      let vx = (b.x - b.px) * damp, vy = (b.y - b.py) * damp;
+      let vx = (b.x - b.px) * 0.998, vy = (b.y - b.py) * 0.998;
       const v = Math.hypot(vx, vy); if (v > vmax) { vx *= vmax / v; vy *= vmax / v; }
       const pull = b.held ? -CLING : 1;
       b.px = b.x; b.py = b.y; b.x += vx + ax * pull; b.y += vy + ay * pull;
@@ -323,12 +320,8 @@ function releaseOne() {
   }
   if (best) best.held = 0;
 }
-let lastTickT = 0;
 function tickTimer(now) {
-  const dtt = lastTickT ? now - lastTickT : 0; lastTickT = now;
   if (state !== 'running' || paused) return;
-  // held sideways the hourglass stops: hold the clock while there is too little pull for a ball to fall
-  if (gNow < 0.5) { nextT += dtt; return; }
   while (now >= nextT && heldCount() > 0) { releaseOne(); nextT += PERIOD(); }
   if (heldCount() === 0) finish(now);
 }
@@ -376,19 +369,12 @@ function onOrient(e) {
   // gravity in the device's own portrait coords (x right, y toward the bottom edge) - browser rotation is ignored
   const sx = Math.sin(c) * Math.cos(b), sy = Math.sin(b);
   const m = Math.hypot(sx, sy);
-  // m: how upright the phone is (0 = lying flat, 1 = standing). Lying flat keeps the last direction.
-  if (m > 0.3) { gx = sx / m; gy = sy / m; }
-  // Standing and turned toward sideways: the pull fades, so the balls stay put while the phone is turned over.
-  // The fade only applies when the phone is clearly standing; lying flat it always pulls fully.
-  const side01 = Math.abs(gy), fade = side01 <= 0.25 ? 0 : side01 >= 0.6 ? 1 : (side01 - 0.25) / 0.35;
-  const stand = m <= 0.3 ? 0 : m >= 0.6 ? 1 : (m - 0.3) / 0.3;
-  gTarget = 1 - stand * (1 - fade);
-  // which end is up: decided only when clearly standing, just past sideways, before the pull toward the new bottom starts
-  const side = m < 0.45 ? 0 : gy > 0.2 ? 1 : gy < -0.2 ? -1 : 0;
+  if (m > 0.3) { gx = sx / m; gy = sy / m; }          // lying flat: keep the last direction
+  const side = sy > 0.5 ? 1 : sy < -0.5 ? -1 : 0;
   const now = performance.now();
   if (side && side !== holdSide && !paused) {
     if (sideCand !== side) { sideCand = side; sideCandT = now; }
-    else if (now - sideCandT > 80) { sideCand = 0; begin(side); }
+    else if (now - sideCandT > 150) { sideCand = 0; begin(side); }
   } else sideCand = 0;
 }
 async function enableSensor() {
@@ -661,7 +647,7 @@ requestAnimationFrame(frame);
 
 // test hook
 window.__bt = {
-  get state() { return { gNow: +gNow.toFixed(2), maxSq: +Math.max(0, ...balls.map(b => Math.abs(b.sq))).toFixed(3), state, n: balls.length, alive: alive(), held: heldCount(), R: +Rcur.toFixed(2), holdSide, sensorOn, gx: +gx.toFixed(2), gy: +gy.toFixed(2), ANG, W, H }; },
+  get state() { return { maxSq: +Math.max(0, ...balls.map(b => Math.abs(b.sq))).toFixed(3), state, n: balls.length, alive: alive(), held: heldCount(), R: +Rcur.toFixed(2), holdSide, sensorOn, gx: +gx.toFixed(2), gy: +gy.toFixed(2), ANG, W, H }; },
   flip: manualFlip, openDial, closeDial, nudge, setCount,
 };
 </script>
