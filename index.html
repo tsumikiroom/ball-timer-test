@@ -146,7 +146,7 @@ function radiusFor(n) {
 function alive() { let n = 0; for (const b of balls) if (!b.dying) n++; return n; }
 function heldCount() { let n = 0; for (const b of balls) if (b.held && !b.dying) n++; return n; }
 function newBall(x, y, held, s) {
-  return { x, y, px: x, py: y, base: 0.86 + Math.random() * 0.28, s, st: 1, held, dying: false, sq: 0, sqv: 0, sqa: 0 };
+  return { x, y, px: x, py: y, base: 0.86 + Math.random() * 0.28, s, st: 1, held, dying: false, sq: 0, sqv: 0, sqa: 0, drop: 0, dropAge: 0 };
 }
 function packAtBottom(n) {
   balls = []; Rcur = radiusFor(n);
@@ -285,6 +285,11 @@ function step(dt) {
   const K = 160, C = 3.6;
   for (let i = 0; i < n; i++) {
     const b = balls[i];
+    if (b.drop) {                                  // a ball released by the timer: one sound when it lands
+      b.dropAge += dt;
+      if (b.dropAge > 0.1 && hit[i] > 150) { b.drop = 0; landSound(hit[i]); }
+      else if (b.dropAge > 4) b.drop = 0;
+    }
     if (hit[i] > 200 && b.sq < 0.12) {
       const kick = Math.min(6.5, (hit[i] - 200) / 90);
       b.sqv += kick; b.sqa = hitA[i];
@@ -316,7 +321,7 @@ function releaseOne() {
     const sc = dx * gx + dy * gy - Math.abs(dx * -gy + dy * gx) * 0.35;
     if (sc > bs) { bs = sc; best = b; }
   }
-  if (best) best.held = 0;
+  if (best) { best.held = 0; best.drop = 1; best.dropAge = 0; }
 }
 function tickTimer(now) {
   if (state !== 'running' || paused) return;
@@ -437,6 +442,35 @@ function tick() {
     bp.type = 'bandpass'; bp.frequency.value = 3200; bp.Q.value = 1.4;
     g.gain.value = 0.22;
     src.connect(bp).connect(g).connect(actx.destination); src.start(t);
+  } catch (e) {}
+}
+// landing: a water-drop "tok" - a sine whose pitch jumps up and vanishes, plus a tiny noise contact.
+// Bigger balls (fewer seconds) sound lower; each one varies a little so it never sounds machine-made.
+let dropBuf = null, lastLand = 0;
+function landSound(speed) {
+  if (!actx) return;
+  const t = actx.currentTime + 0.005;
+  if (t - lastLand < 0.05) return;
+  lastLand = t;
+  try {
+    if (!dropBuf) {
+      const len = Math.floor(actx.sampleRate * 0.25);
+      dropBuf = actx.createBuffer(1, len, actx.sampleRate);
+      const d = dropBuf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    }
+    const z = Math.pow(Math.max(1, alive()) / 60, 0.22) * (1 + (Math.random() * 2 - 1) * 0.06);
+    const v = Math.min(1, 0.45 + speed / 3000) * (1 + (Math.random() * 2 - 1) * 0.18);
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(480 * z, t); o.frequency.exponentialRampToValueAtTime(1350 * z, t + 0.045);
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.4 * v, t + 0.003);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.08);
+    o.connect(g).connect(actx.destination); o.start(t); o.stop(t + 0.1);
+    const s = actx.createBufferSource(), f = actx.createBiquadFilter(), g2 = actx.createGain();
+    s.buffer = dropBuf; s.playbackRate.value = 0.9 + Math.random() * 0.2; f.type = 'bandpass'; f.frequency.value = 1800 * z; f.Q.value = 2;
+    g2.gain.setValueAtTime(0.1 * v, t); g2.gain.exponentialRampToValueAtTime(0.0001, t + 0.01);
+    s.connect(f).connect(g2).connect(actx.destination); s.start(t, Math.random() * 0.1); s.stop(t + 0.03);
   } catch (e) {}
 }
 let lock = null, wantLock = false, asking = false;
