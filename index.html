@@ -20,7 +20,6 @@ html, body {
 #stage { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
 #stage.turn { transition: transform .7s cubic-bezier(.55,.05,.3,1); }
 .hud { position: absolute; inset: 0; pointer-events: none; transition: transform .4s ease; }
-#app.inv .hud, #app.inv #dial .box { transform: rotate(180deg); }
 #hint {
   position: absolute; left: 16px; right: 16px; top: 50%; transform: translateY(-50%);
   text-align: center; color: var(--mute); font-size: 15px; transition: opacity .6s; white-space: pre-line;
@@ -303,7 +302,6 @@ const PERIOD = () => 1000 / SPEED;
 function begin(side) {
   if (side !== holdSide) dragA = null;
   holdSide = side;
-  $app.classList.toggle('inv', side < 0);
   let held = 0;
   for (const b of balls) { b.held = (!b.dying && onUpSide(b)) ? 1 : 0; held += b.held; }
   if (!held) { state = 'ready'; return; }
@@ -370,12 +368,27 @@ function onOrient(e) {
   const sx = Math.sin(c) * Math.cos(b), sy = Math.sin(b);
   const m = Math.hypot(sx, sy);
   if (m > 0.3) { gx = sx / m; gy = sy / m; }          // lying flat: keep the last direction
+  followUi();
   const side = sy > 0.5 ? 1 : sy < -0.5 ? -1 : 0;
   const now = performance.now();
   if (side && side !== holdSide && !paused) {
     if (sideCand !== side) { sideCand = side; sideCandT = now; }
     else if (now - sideCandT > 150) { sideCand = 0; begin(side); }
   } else sideCand = 0;
+}
+// text and dial turn with the phone in 90-degree steps, so they read upright whichever edge is down
+let uiDeg = 0;
+const $hud = document.querySelector('.hud'), $dialBox = document.querySelector('#dial .box');
+function followUi() {
+  const g = Math.atan2(gy, gx) * 180 / Math.PI - 90;           // 0 when the bottom edge is down
+  const snap = Math.round(g / 90) * 90;
+  let d = ((g - uiDeg) % 360 + 540) % 360 - 180;                 // how far the gravity is from the current UI angle
+  if (Math.abs(d) < 60) return;                                  // stay until clearly past the 45-degree line
+  let step = ((snap - uiDeg) % 360 + 540) % 360 - 180;           // shortest way round
+  uiDeg += step;
+  dragA = null;                                                  // the dial turned: start the drag again
+  const t = `rotate(${uiDeg}deg)`;
+  $hud.style.transform = t; $dialBox.style.transform = t;
 }
 async function enableSensor() {
   const DOE = window.DeviceOrientationEvent;
@@ -560,7 +573,7 @@ function ringAngle(e) {
   const r = $ring.getBoundingClientRect();
   let a = Math.atan2(e.clientX - (r.left + r.width / 2), -(e.clientY - (r.top + r.height / 2)));
   a += ANG * Math.PI / 180;                                    // #app may be turned against the browser rotation
-  if ($app.classList.contains('inv')) a += Math.PI;            // the dial is shown upside down
+  a -= uiDeg * Math.PI / 180;                                  // the dial is shown turned with the phone
   return a;
 }
 function currentCount() { return state === 'running' ? heldCount() : alive(); }
@@ -647,7 +660,7 @@ requestAnimationFrame(frame);
 
 // test hook
 window.__bt = {
-  get state() { return { maxSq: +Math.max(0, ...balls.map(b => Math.abs(b.sq))).toFixed(3), state, n: balls.length, alive: alive(), held: heldCount(), R: +Rcur.toFixed(2), holdSide, sensorOn, gx: +gx.toFixed(2), gy: +gy.toFixed(2), ANG, W, H }; },
+  get state() { return { uiDeg, maxSq: +Math.max(0, ...balls.map(b => Math.abs(b.sq))).toFixed(3), state, n: balls.length, alive: alive(), held: heldCount(), R: +Rcur.toFixed(2), holdSide, sensorOn, gx: +gx.toFixed(2), gy: +gy.toFixed(2), ANG, W, H }; },
   flip: manualFlip, openDial, closeDial, nudge, setCount,
 };
 </script>
